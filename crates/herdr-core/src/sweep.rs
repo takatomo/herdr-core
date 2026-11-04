@@ -233,7 +233,7 @@ fn processes() -> Option<Vec<Proc>> {
         pids()?
             .into_iter()
             .filter(|&pid| pid > 0)
-            .filter_map(read)
+            .filter_map(|pid| read(pid).ok())
             .filter(|(_, zombie)| !zombie)
             .map(|(p, _)| p)
             .collect(),
@@ -246,14 +246,21 @@ fn pids() -> Option<Vec<i32>> {
     Some(dir.flatten().filter_map(|e| e.file_name().to_str()?.parse().ok()).collect())
 }
 
-/// One process, and whether it is a zombie; None when it can't be read.
+/// One process, and whether it is a zombie; else the error (`ESRCH`: no
+/// such process, None: read but not understood).
 #[cfg(target_os = "linux")]
-fn read(pid: i32) -> Option<(Proc, bool)> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
-    let (state, ppid, pgid) = (*fields.first()?, fields.get(1)?.parse().ok()?, fields.get(2)?.parse().ok()?);
-    let started = fields.get(19).and_then(|t| t.parse().ok()).unwrap_or(u64::MAX); // field 22, in ticks
-    Some((Proc { pid, ppid, pgid, started }, state == "Z" || state == "X"))
+fn read(pid: i32) -> Result<(Proc, bool), Option<i32>> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => Some(libc::ESRCH),
+        _ => e.raw_os_error(),
+    })?;
+    let parse = || {
+        let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
+        let (state, ppid, pgid) = (*fields.first()?, fields.get(1)?.parse().ok()?, fields.get(2)?.parse().ok()?);
+        let started = fields.get(19).and_then(|t| t.parse().ok()).unwrap_or(u64::MAX); // field 22, in ticks
+        Some((Proc { pid, ppid, pgid, started }, state == "Z" || state == "X"))
+    };
+    parse().ok_or(None)
 }
 
 /// NUL-separated `KEY=value` entries; a zombie has none.
@@ -278,21 +285,25 @@ fn pids() -> Option<Vec<i32>> {
     Some(pids)
 }
 
-/// One process, and whether it is a zombie; None when it can't be read.
+/// One process, and whether it is a zombie; else the error (`ESRCH`: no
+/// such process, which a zombie gets too; None: a short read).
 #[cfg(target_os = "macos")]
-fn read(pid: i32) -> Option<(Proc, bool)> {
+fn read(pid: i32) -> Result<(Proc, bool), Option<i32>> {
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
     let got = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
+    if got <= 0 {
+        return Err(std::io::Error::last_os_error().raw_os_error());
+    }
     if got != size {
-        return None;
+        return Err(None);
     }
     const SZOMB: u32 = 5;
     let mut usage: libc::rusage_info_v0 = unsafe { std::mem::zeroed() };
     let read = unsafe { libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V0, (&raw mut usage).cast()) };
     let started = if read == 0 { usage.ri_proc_start_abstime } else { u64::MAX };
     let process = Proc { pid, ppid: info.pbi_ppid as i32, pgid: info.pbi_pgid as i32, started };
-    Some((process, info.pbi_status == SZOMB))
+    Ok((process, info.pbi_status == SZOMB))
 }
 
 #[cfg(target_os = "macos")]
@@ -329,17 +340,14 @@ mod group {
             return Probe::Unreadable;
         }
         match read(pid) {
-            Some((_, true)) => Probe::Absent,
-            Some((p, false)) => Probe::Live { pgid: p.pgid, started: (p.started != u64::MAX).then_some(p.started) },
-            None => {
-                let exists = unsafe { libc::kill(pid, 0) } == 0;
-                unread(if exists { None } else { std::io::Error::last_os_error().raw_os_error() })
-            }
+            Ok((_, true)) => Probe::Absent,
+            Ok((p, false)) => Probe::Live { pgid: p.pgid, started: (p.started != u64::MAX).then_some(p.started) },
+            Err(error) => unread(error),
         }
     }
 
-    /// A pid that exists for `kill(pid, 0)` or failed it with `error`: gone
-    /// only when the system says no such process.
+    /// A pid whose read failed with `error`: gone only when the system says
+    /// no such process (not when it won't let us look: another user's).
     fn unread(error: Option<i32>) -> Probe {
         if error == Some(libc::ESRCH) { Probe::Absent } else { Probe::Unreadable }
     }
@@ -440,39 +448,43 @@ mod group {
         kept: &mut [Vec<(i32, u64)>],
         boot: Option<&str>,
         signal: Option<i32>,
+        kill: &mut dyn FnMut(i32, i32),
     ) -> Look {
         let me = std::process::id() as i32;
         let live = processes();
         let carriers = live.as_deref().map(|live| carriers(tokens, live)).unwrap_or_default();
-        let send = |pid: i32| {
+        let mut send = |pid: i32| {
             if let Some(signal) = signal {
-                unsafe { libc::kill(pid, signal) };
+                kill(pid, signal);
             }
         };
+        // Every group's members are found before anything is signalled: a
+        // leader that ends at its first signal (as a token's carrier) must not
+        // take them out of sight.
+        let verdicts: Vec<Option<Verdict>> = records
+            .iter()
+            .zip(kept.iter_mut())
+            .map(|(record, kept)| {
+                let Record::Leader(leader) = record else { return None };
+                let verdict = verify(probe(leader.pid), leader, boot);
+                let skip = |pid| pid == me || is_hc(pid);
+                *kept = candidates(kept, verdict, leader, live.as_deref().unwrap_or_default(), skip);
+                Some(verdict)
+            })
+            .collect();
         for &pid in &carriers {
             send(pid);
         }
-        let mut verdicts = Vec::with_capacity(records.len());
         for (record, kept) in records.iter().zip(kept.iter_mut()) {
-            let Record::Leader(leader) = record else {
-                verdicts.push(None);
-                continue;
-            };
-            let verdict = verify(probe(leader.pid), leader, boot);
-            let skip = |pid| pid == me || is_hc(pid);
-            let mut still = Vec::new();
-            for (pid, started) in candidates(kept, verdict, leader, live.as_deref().unwrap_or_default(), skip) {
-                match member(probe(pid), started, leader.pid) {
-                    Member::Send => {
-                        send(pid);
-                        still.push((pid, started));
-                    }
-                    Member::Unconfirmed => still.push((pid, started)),
-                    Member::Ended => {}
+            let Record::Leader(leader) = record else { continue };
+            kept.retain(|&(pid, started)| match member(probe(pid), started, leader.pid) {
+                Member::Send => {
+                    send(pid);
+                    true
                 }
-            }
-            *kept = still;
-            verdicts.push(Some(verdict));
+                Member::Unconfirmed => true,
+                Member::Ended => false,
+            });
         }
         Look { listed: live.is_some(), carriers, verdicts }
     }
@@ -483,15 +495,22 @@ mod group {
     }
 
     pub fn sweep_with(tokens: &[String], records: &[Record]) -> Vec<Outcome> {
+        sweep_sending(tokens, records, &mut |pid, signal| unsafe {
+            libc::kill(pid, signal);
+        })
+    }
+
+    /// `sweep_with`, each signal sent by `kill`.
+    fn sweep_sending(tokens: &[String], records: &[Record], kill: &mut dyn FnMut(i32, i32)) -> Vec<Outcome> {
         let boot = crate::platform::boot_generation();
         let mut kept = vec![Vec::new(); records.len()];
         let mut last = None;
         for (signal, wait) in STEPS {
-            let mut seen = look(tokens, records, &mut kept, boot.as_deref(), Some(signal));
+            let mut seen = look(tokens, records, &mut kept, boot.as_deref(), Some(signal), kill);
             let deadline = Instant::now() + Duration::from_millis(wait);
             while !settled(&seen, &kept) && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(25));
-                seen = look(tokens, records, &mut kept, boot.as_deref(), None);
+                seen = look(tokens, records, &mut kept, boot.as_deref(), None, kill);
             }
             let done = settled(&seen, &kept);
             last = Some(seen);
@@ -499,7 +518,7 @@ mod group {
                 break;
             }
         }
-        let seen = last.unwrap_or_else(|| look(tokens, records, &mut kept, boot.as_deref(), None));
+        let seen = last.unwrap_or_else(|| look(tokens, records, &mut kept, boot.as_deref(), None, kill));
         let carried = !seen.carriers.is_empty();
         records
             .iter()
@@ -581,6 +600,16 @@ mod group {
             assert_eq!(unread(None), Probe::Unreadable);
             let me = std::process::id() as i32;
             assert!(matches!(probe(me), Probe::Live { started: Some(_), .. }), "{:?}", probe(me));
+            // Ended but not reaped: macOS won't read it, yet `kill(pid, 0)` still finds it.
+            let mut zombie = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+            let pid = zombie.id() as i32;
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while matches!(probe(pid), Probe::Live { .. }) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(probe(pid), Probe::Absent, "a zombie has ended");
+            zombie.wait().unwrap();
         }
 
         #[test]
@@ -606,6 +635,49 @@ mod group {
                     "{record:?} {verdict:?} left {group_left} listed {listed} carried {carried}"
                 );
             }
+        }
+
+        #[test]
+        fn a_member_seen_before_its_leader_ended_is_still_ended() {
+            use std::io::BufRead;
+            use std::os::unix::process::CommandExt;
+            let tokens = [super::super::token()];
+            let python = |code: &str| {
+                let mut cmd = std::process::Command::new("python3");
+                cmd.args(["-c", code]);
+                cmd
+            };
+            let mut leader = python("import time; time.sleep(30)");
+            let mut leader = leader.env(super::super::VAR, &tokens[0]).process_group(0).spawn().unwrap();
+            let pid = leader.id() as i32;
+            // In its group, but without the token, and deaf to a hangup.
+            let deaf = "import signal, time; signal.signal(signal.SIGHUP, signal.SIG_IGN); print(1, flush=True); time.sleep(30)";
+            let mut member = python(deaf);
+            member.env_remove(super::super::VAR).process_group(pid).stdout(std::process::Stdio::piped());
+            let mut member = member.spawn().unwrap();
+            let mut ready = String::new();
+            std::io::BufReader::new(member.stdout.take().unwrap()).read_line(&mut ready).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while super::super::members(&tokens) != [pid] {
+                assert!(Instant::now() < deadline, "the leader carries its token");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let record = Record::Leader(super::super::leader(pid as u32).unwrap());
+            // The leader ends the moment its first signal is sent, before anything else is looked at.
+            let outcomes = sweep_sending(&tokens, &[record], &mut |to, signal| {
+                unsafe { libc::kill(to, signal) };
+                if to == pid {
+                    let _ = leader.wait();
+                }
+            });
+            leader.wait().unwrap();
+            let ended = member.try_wait().unwrap();
+            if ended.is_none() {
+                member.kill().unwrap();
+            }
+            member.wait().unwrap();
+            assert!(ended.is_some(), "the member was ended too");
+            assert_eq!(outcomes, [Outcome::Done]);
         }
 
         #[test]
