@@ -218,3 +218,23 @@ fn exec_left_by_a_crashed_core_ends_at_its_next_start() {
     s.json(&["server", "status"]);
     gone(pid);
 }
+
+#[test]
+fn a_record_naming_a_reused_pid_never_ends_that_process() {
+    use std::os::unix::process::CommandExt;
+    let s = Session::new();
+    // Its own group: what the record names must never reach the test's.
+    let mut other = std::process::Command::new("sleep").arg("30").process_group(0).spawn().unwrap();
+    let boot = herdr_core::platform::boot_generation().expect("this boot is known");
+    // Its pid in this boot, but another start: an earlier process that had the pid.
+    let leader = herdr_core::sweep::Leader { pid: other.id() as i32, started: 1, boot };
+    let execs = s.root.join("state/herdr-core/test/execs");
+    std::fs::create_dir_all(&execs).unwrap();
+    let record = execs.join("0-reused");
+    std::fs::write(&record, leader.line()).unwrap();
+    s.json(&["server", "status"]);
+    wait_until("the record went", || !record.exists());
+    assert!(other.try_wait().unwrap().is_none(), "the process that has the pid now is untouched");
+    other.kill().unwrap();
+    other.wait().unwrap();
+}

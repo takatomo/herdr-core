@@ -676,6 +676,11 @@ pub fn hostname() -> String {
     std::env::var("COMPUTERNAME").unwrap_or_else(|_| "windows".into()).to_lowercase()
 }
 
+/// Not needed: each exec's job object ends its processes, crash or not.
+pub fn boot_generation() -> Option<String> {
+    None
+}
+
 /// This system's own id (MachineGuid, new on a sysprepped clone). None when unreadable.
 pub fn machine_id() -> Option<String> {
     use std::os::windows::process::CommandExt;

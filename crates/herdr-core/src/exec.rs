@@ -1,11 +1,14 @@
 //! `machine.exec`: one program without a terminal, and exactly what it wrote.
 //! Nothing it started outlives it: its own process group (a job on Windows)
 //! and scope token, swept whenever it ends. The token is kept in the state dir
-//! until swept, so a core that crashed mid-exec sweeps it at its next start.
+//! until swept, so a core that crashed mid-exec sweeps it at its next start,
+//! along with the group its program led while that leader is provably the
+//! same process (this boot, pid, start); a record that can't be checked stays.
 
 use crate::api::{ExecParams, ExecResult};
 use crate::rpc::RpcError;
 use crate::runtime::Core;
+use crate::sweep::{Leader, Outcome, Record};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -99,7 +102,8 @@ fn tokens_dir(state: &Path) -> PathBuf {
     state.join("execs")
 }
 
-/// At start: sweep what execs of a crashed core left running.
+/// At start: sweep what execs of a crashed core left running. A record goes
+/// only once all it names was seen ended.
 pub fn sweep_leftovers(state: &Path) {
     let dir = tokens_dir(state);
     let files: Vec<PathBuf> = std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.path()).collect();
@@ -109,10 +113,38 @@ pub fn sweep_leftovers(state: &Path) {
     let slot = Slot::cleanup();
     std::thread::spawn(move || {
         let _slot = slot;
-        let tokens: Vec<String> = files.iter().filter_map(|f| Some(f.file_name()?.to_str()?.to_string())).collect();
-        crate::sweep::sweep(&tokens);
-        files.iter().for_each(|f| drop(std::fs::remove_file(f)));
+        let found: Vec<(PathBuf, String, Record)> = files
+            .into_iter()
+            .filter_map(|f| {
+                let token = f.file_name()?.to_str()?.to_string();
+                let record = read_record(&f)?;
+                Some((f, token, record))
+            })
+            .collect();
+        let tokens: Vec<String> = found.iter().map(|(_, token, _)| token.clone()).collect();
+        let records: Vec<Record> = found.iter().map(|(.., record)| record.clone()).collect();
+        let outcomes = crate::sweep::sweep_with(&tokens, &records);
+        for ((file, ..), outcome) in found.iter().zip(outcomes) {
+            if outcome == Outcome::Done {
+                let _ = std::fs::remove_file(file);
+            }
+        }
     });
+}
+
+/// What an exec's record says; None once it is gone.
+fn read_record(file: &Path) -> Option<Record> {
+    match std::fs::read(file) {
+        Ok(bytes) => Some(
+            String::from_utf8_lossy(&bytes)
+                .lines()
+                .next()
+                .and_then(Leader::parse)
+                .map_or(Record::NoIdentity, Record::Leader),
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => Some(Record::Unreadable),
+    }
 }
 
 /// The folder `cwd` names: from this machine's home for a caller from afar,
@@ -176,6 +208,11 @@ pub async fn run(core: &Arc<Core>, p: ExecParams, from_afar: bool) -> Result<Exe
             return Err(RpcError::new("spawn_failed", format!("cannot start {what}: {e}"), ""));
         }
     };
+    // Read before it can be reaped, so its pid is still its own; without it
+    // the record stays empty (its token alone).
+    if let Some(leader) = child.id().and_then(crate::sweep::leader) {
+        let _ = std::fs::write(&file, leader.line());
+    }
     // Never run uncontained.
     let group = match crate::platform::ExecGroup::new(&child) {
         Ok(group) => group,
@@ -328,5 +365,25 @@ impl Drop for Tree {
             self.group.end();
             std::thread::spawn(ender);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_record_that_cant_be_read_is_never_taken_for_one_without_a_leader() {
+        let dir = std::env::temp_dir().join(format!("hc-exec-record-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("unreadable")).unwrap();
+        std::fs::write(dir.join("empty"), b"").unwrap();
+        let leader = Leader { pid: 100, started: 7, boot: "boot".into() };
+        std::fs::write(dir.join("named"), leader.line()).unwrap();
+        assert_eq!(read_record(&dir.join("unreadable")), Some(Record::Unreadable), "reading it fails");
+        assert_eq!(read_record(&dir.join("empty")), Some(Record::NoIdentity));
+        assert_eq!(read_record(&dir.join("named")), Some(Record::Leader(leader)));
+        assert_eq!(read_record(&dir.join("gone")), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

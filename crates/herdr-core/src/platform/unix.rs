@@ -520,6 +520,29 @@ pub fn hostname() -> String {
     String::from_utf8_lossy(&buf[..end]).into_owned()
 }
 
+/// This boot of the system, so a process is never taken for one of an
+/// earlier boot with the same pid and start: macOS's boot session UUID (not
+/// its boot time, which moves when the clock is set), Linux's boot_id. None
+/// when it can't be read; nothing else stands in.
+pub fn boot_generation() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    let text = {
+        let mut buf = [0u8; 64];
+        let mut len = buf.len();
+        let name = c"kern.bootsessionuuid";
+        let got =
+            unsafe { libc::sysctlbyname(name.as_ptr(), buf.as_mut_ptr().cast(), &mut len, std::ptr::null_mut(), 0) };
+        if got != 0 {
+            return None;
+        }
+        String::from_utf8_lossy(&buf[..len.min(buf.len())]).trim_end_matches('\0').to_string()
+    };
+    #[cfg(not(target_os = "macos"))]
+    let text = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    let text = text.trim();
+    (!text.is_empty() && !text.contains(char::is_whitespace)).then(|| text.to_string())
+}
+
 /// This system's own id, new on a cloned disk: Linux's machine-id (made per
 /// box at first boot), a Mac's hardware UUID. None when there is none or it
 /// can't be read. One source only: a second one that disagrees, read when
