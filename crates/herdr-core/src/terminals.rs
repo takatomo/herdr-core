@@ -141,6 +141,20 @@ pub struct Terminal {
     /// Machines (core ids) it started work on: they may call back to it.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub afar: std::collections::BTreeSet<String>,
+    /// Who views it now (`terminal.attach` streams open on it), while this
+    /// core runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub viewers: Vec<Viewing>,
+}
+
+/// One viewer of a terminal.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default, PartialEq)]
+pub struct Viewing {
+    /// Its client's process, as the client said, on that client's machine;
+    /// null for one that did not say or that views from another machine.
+    pub pid: Option<u32>,
+    /// Watch only: it never types or sets the size.
+    pub observe: bool,
 }
 
 impl Terminal {
@@ -310,6 +324,7 @@ impl Registry {
                 template: new.template.map(|t| t.name),
                 first_message: None,
                 holder: None,
+                viewers: Vec::new(),
             },
         );
         Ok(id)

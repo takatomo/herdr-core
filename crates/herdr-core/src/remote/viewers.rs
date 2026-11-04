@@ -83,6 +83,10 @@ pub(super) fn negotiate_resize(line: &Line, params: &mut Value) {
 /// relayed to a new channel on this connection, both ways.
 pub async fn attach(core: &Core, conn: &Arc<Conn>, m: &Machine, mut params: Value) -> Result<Value, RpcError> {
     let line = line(core, m).await?;
+    // A process id names a process on this machine, not on that one.
+    if let Some(params) = params.as_object_mut() {
+        params.remove("pid");
+    }
     negotiate_resize(&line, &mut params);
     let here = conn.new_channel();
     conn.with(|out| out.open_paused(here));

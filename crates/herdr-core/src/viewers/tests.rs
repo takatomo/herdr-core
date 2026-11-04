@@ -32,6 +32,7 @@ fn resize_drags_serialize_nothing_without_observers_and_only_latest_when_stalled
     let leader = Arc::new(Conn::default());
     let request = |observe, resize_notifications| AttachRequest {
         observe,
+        pid: None,
         resize_notifications,
         history: 0,
         size: (80, 24),

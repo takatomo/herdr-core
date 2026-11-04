@@ -32,6 +32,7 @@ pub struct Viewer {
     pub conn: Arc<Conn>,
     pub channel: u32,
     pub observe: bool,
+    pid: Option<u32>,
     resize_notifications: bool,
     repaint_pending: bool,
     size: (u16, u16),
@@ -57,6 +58,7 @@ fn rgb(hex: &Option<String>) -> Option<Rgb> {
 
 pub struct AttachRequest {
     pub observe: bool,
+    pub pid: Option<u32>,
     pub resize_notifications: bool,
     pub history: usize,
     pub size: (u16, u16),
@@ -84,6 +86,7 @@ impl Core {
             conn: conn.clone(),
             channel,
             observe: req.observe,
+            pid: req.pid,
             resize_notifications: req.observe && req.resize_notifications,
             repaint_pending: false,
             size: req.size,
@@ -92,6 +95,7 @@ impl Core {
             recovering,
         });
         self.apply_size(&mut st, id);
+        self.viewers_changed(&mut st, id);
         let paint = first_paint(&st, id, req.history);
         st.viewers.get_mut(&id).unwrap().last_mut().unwrap().repaint_pending = false;
         conn.with(|out| {
@@ -327,7 +331,22 @@ impl Core {
         st.viewers.retain(|_, vs| !vs.is_empty());
         for id in touched {
             self.apply_size(&mut st, id);
+            self.viewers_changed(&mut st, id);
         }
+    }
+
+    /// The record lists who views it now; subscribers hear when that changes.
+    pub(crate) fn viewers_changed(&self, st: &mut State, id: u32) {
+        let now: Vec<crate::terminals::Viewing> = st
+            .viewers
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .map(|v| crate::terminals::Viewing { pid: v.pid, observe: v.observe })
+            .collect();
+        let Some(t) = st.reg.terminals.get_mut(&id).filter(|t| t.viewers != now) else { return };
+        t.viewers = now.clone();
+        self.emit(st, "viewers", id, serde_json::json!({"viewers": now}));
     }
 
     /// The most recently active typing viewer sets size and display facts;

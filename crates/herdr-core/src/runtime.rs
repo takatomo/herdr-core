@@ -162,7 +162,9 @@ fn finish_reason(killed: bool, stopping: bool, host_shutdown: bool) -> &'static 
 
 impl Core {
     pub fn start(paths: Paths, info: CoreInfo) -> io::Result<Arc<Core>> {
-        let reg: Registry = read_state(&paths.state.join("terminals.json"))?;
+        let mut reg: Registry = read_state(&paths.state.join("terminals.json"))?;
+        // Viewers are streams of the core that saved this: none survive it.
+        reg.terminals.values_mut().for_each(|t| t.viewers.clear());
         let docs_path = paths.state.join("docs.json");
         let docs = read_state(&docs_path).unwrap_or_else(|e| {
             eprintln!("core: cannot load documents, starting empty: {e}");
@@ -728,6 +730,7 @@ impl Core {
         for v in st.viewers.remove(&id).unwrap_or_default() {
             v.conn.with(|out| out.finish(v.channel, end.to_string().as_bytes()));
         }
+        self.viewers_changed(st, id);
         st.relays.remove(&id);
         if let Some(snapshot) = st.screens.remove(&id).and_then(|s| s.snapshot())
             && let Err(e) = write_atomic(&self.snapshot_path(id), &snapshot)

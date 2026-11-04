@@ -411,9 +411,11 @@ fn attaching_to_a_terminal_on_another_machine() {
     let size = |s: &Session, t: &str| (get(s, t)["cols"].as_u64(), get(s, t)["rows"].as_u64());
     let headless = size(&rohan, "t1");
 
-    let mut v = Viewer::attach(&s, &t, 100, 30, json!({}));
+    let mut v = Viewer::attach(&s, &t, 100, 30, json!({"pid": 4242}));
     v.shows("ready");
     assert_eq!(size(&rohan, "t1"), (Some(100), Some(30)), "the viewer's size reaches the program there");
+    // A process id names a process on the viewer's machine only.
+    assert_eq!(get(&rohan, "t1")["viewers"], json!([{"pid": null, "observe": false}]));
     v.typed(b"hi\r");
     v.shows("got-hi");
     drop(v);

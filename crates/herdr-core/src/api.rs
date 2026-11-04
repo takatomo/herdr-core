@@ -14,7 +14,7 @@ use std::time::Duration;
 
 pub const GENERATION: u32 = 1;
 pub const FEATURES: &[&str] =
-    &["framed", "attach", "events", "status", "shell", "resize_notifications", "automatic_input"];
+    &["framed", "attach", "events", "status", "shell", "resize_notifications", "automatic_input", "viewers"];
 pub const FINISHED_LINES: usize = 1000;
 /// A terminal's identity: fixed at start from whoever starts it.
 pub const IDENTITY_VARS: &[&str] = &["TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "COLORTERM"];
@@ -429,6 +429,7 @@ async fn terminal_attach(core: Ctx<'_>, p: AttachParams) -> Result<AttachResult,
     }
     let req = crate::viewers::AttachRequest {
         observe: p.observe,
+        pid: p.pid,
         resize_notifications: p.resize_notifications,
         history: p.history,
         size: (p.cols, p.rows),

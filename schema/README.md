@@ -106,6 +106,17 @@ CREDIT for the bytes it has written out. A viewer that falls more than
 never blocks channel 0 or other streams.
 
 A viewer detaches by sending CLOSE; the core answers with an empty CLOSE.
+
+Each terminal record lists its current viewers in `viewers` (omitted when
+none): `{pid, observe}` each, where `pid` is the process id the viewer gave
+as `pid` on `terminal.attach` (`hc attach` gives its own). It means something
+on the viewer's machine only: a core relaying an attach to another machine
+does not pass it on, so viewers from elsewhere show `pid: null`. The list
+changes when a viewer attaches, detaches, loses its connection or its terminal
+ends, with a `viewers` event; a restarted core starts with none. Cores that
+report viewers advertise `viewers` in `hello.features`. A terminal program
+that hosts `hc attach` can match these ids to the processes it runs to tell
+which terminal it shows.
 When the program ends, the core sends CLOSE with
 `{"reason":"exited","exit_code":0,"signal":null}` (`reason` as in the
 terminal record: exited, killed, server_stop, ...).
@@ -138,6 +149,7 @@ Each event's `data`, and how to apply it to a snapshot:
 | `labels` | `{labels}`: all labels now; plus `record` (the whole `Terminal`) when it newly matches your filter | replace `labels`; with `record`, add it; with a label filter, a terminal that no longer matches leaves your view (you still get this event) |
 | `size` | `{cols, rows}` | set both |
 | `foreground` | `{pid, name, argv, cwd}`, or null: what runs in it now (the foreground process group's leader) and its folder; read about twice a second | set `foreground` |
+| `viewers` | `{viewers}`: everyone viewing it now, `[{pid, observe}]` | replace `viewers` |
 
 Terminals on machines this core added are in the same stream, addressed as
 seen from here (`rohan/t7`), in the same order and filters (`terminal`,

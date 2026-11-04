@@ -26,6 +26,7 @@ async fn keys_pressed_during_a_paste_follow_its_submit() {
             id,
             AttachRequest {
                 observe: false,
+                pid: None,
                 resize_notifications: false,
                 history: 0,
                 size: (80, 24),

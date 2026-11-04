@@ -514,6 +514,64 @@ fn the_picker_takes_text_and_enter_in_one_read() {
     assert!(s.json(&["read", &picker])["text"].as_str().unwrap().contains("name: beta"));
 }
 
+/// Who views `t` now, as its record says: `(pid, observe)` each.
+fn viewers(s: &Session, t: &str) -> Value {
+    get(s, t).get("viewers").cloned().unwrap_or(json!([]))
+}
+
+#[test]
+fn an_attached_client_is_listed_as_a_viewer_until_it_detaches() {
+    let s = Session::new();
+    let inner = run(&s, &["sh", "-c", "echo inner-ready; sleep 100"]);
+    let hello = s.connect().call(1, "hello", json!({}));
+    assert!(hello["result"]["features"].as_array().unwrap().contains(&json!("viewers")), "{hello}");
+    let mut events = s.connect();
+    events.call(1, "events.subscribe", json!({"terminal": inner}));
+    let bin = s.bin.display().to_string();
+    let outer = run(&s, &[&bin, "attach", &inner]);
+    let mut v = Viewer::attach(&s, &outer, 90, 25, json!({}));
+    v.shows("inner-ready");
+    let client = get(&s, &outer)["pid"].clone();
+    let shown = json!([{"pid": client, "observe": false}]);
+    let e = next_event(&mut events, |m| m["params"]["type"] == "viewers");
+    assert_eq!(e["params"]["data"]["viewers"], shown);
+    assert_eq!(viewers(&s, &inner), shown);
+
+    v.typed(b"\x1c");
+    v.until("client exit", |v| v.closed.is_some());
+    let e = next_event(&mut events, |m| m["params"]["type"] == "viewers");
+    assert_eq!(e["params"]["data"]["viewers"], json!([]));
+    assert_eq!(viewers(&s, &inner), json!([]));
+}
+
+#[test]
+fn a_client_that_picked_its_terminal_from_the_list_is_its_viewer() {
+    let s = Session::new();
+    let inner = run(&s, &["--name", "target", "sh", "-c", "echo inner-ready; sleep 100"]);
+    let bin = s.bin.display().to_string();
+    let outer = run(&s, &[&bin, "attach"]);
+    let mut v = Viewer::attach(&s, &outer, 90, 25, json!({}));
+    v.shows("target");
+    v.typed(b"target\r");
+    v.shows("inner-ready");
+    let client = get(&s, &outer)["pid"].clone();
+    wait_until("listed", || viewers(&s, &inner) == json!([{"pid": client, "observe": false}]));
+}
+
+#[test]
+fn a_killed_client_leaves_no_viewer_behind() {
+    let s = Session::new();
+    let inner = run(&s, &["sleep", "100"]);
+    let (bin, root) = (s.bin.display().to_string(), s.root.display().to_string());
+    let script = format!("sh -c 'echo $$ > {root}/pid; exec {bin} attach {inner}'; sleep 100");
+    run(&s, &["sh", "-c", &script]);
+    wait_until("attached", || viewers(&s, &inner).as_array().is_some_and(|v| !v.is_empty()));
+    let pid: i32 = std::fs::read_to_string(s.root.join("pid")).unwrap().trim().parse().unwrap();
+    assert_eq!(viewers(&s, &inner), json!([{"pid": pid, "observe": false}]));
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    wait_until("no viewer", || viewers(&s, &inner) == json!([]));
+}
+
 #[test]
 fn hc_attach_relays_both_ways_and_detaches_on_ctrl_backslash() {
     let s = Session::new();

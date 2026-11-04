@@ -406,6 +406,12 @@ pub struct AttachParams {
     #[arg(skip)]
     #[serde(default)]
     pub caller: Option<String>,
+    /// The viewer's own process id, listed in the terminal's `viewers`, so a
+    /// terminal program hosting that process can tell which terminal it
+    /// shows. It means something on the viewer's machine only.
+    #[arg(skip)]
+    #[serde(default)]
+    pub pid: Option<u32>,
 }
 
 #[derive(Serialize, JsonSchema)]

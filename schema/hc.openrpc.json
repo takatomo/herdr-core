@@ -881,6 +881,13 @@
             "minimum": 0,
             "type": "integer"
           },
+          "viewers": {
+            "description": "Who views it now (`terminal.attach` streams open on it), while this\ncore runs.",
+            "items": {
+              "$ref": "#/components/schemas/Viewing"
+            },
+            "type": "array"
+          },
           "wait": {
             "anyOf": [
               {
@@ -1358,6 +1365,13 @@
             "minimum": 0,
             "type": "integer"
           },
+          "viewers": {
+            "description": "Who views it now (`terminal.attach` streams open on it), while this\ncore runs.",
+            "items": {
+              "$ref": "#/components/schemas/Viewing"
+            },
+            "type": "array"
+          },
           "waiting_for_person": {
             "default": false,
             "description": "An incoming message is held for the person's unsent draft (not composer detection).",
@@ -1374,6 +1388,28 @@
           "screen",
           "cols",
           "rows"
+        ],
+        "type": "object"
+      },
+      "Viewing": {
+        "description": "One viewer of a terminal.",
+        "properties": {
+          "observe": {
+            "description": "Watch only: it never types or sets the size.",
+            "type": "boolean"
+          },
+          "pid": {
+            "description": "Its client's process, as the client said, on that client's machine;\nnull for one that did not say or that views from another machine.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "observe"
         ],
         "type": "object"
       },
@@ -2347,6 +2383,21 @@
             "default": false,
             "description": "Watch only: never type or resize.",
             "type": "boolean"
+          }
+        },
+        {
+          "description": "The viewer's own process id, listed in the terminal's `viewers`, so a\nterminal program hosting that process can tell which terminal it\nshows. It means something on the viewer's machine only.",
+          "name": "pid",
+          "required": false,
+          "schema": {
+            "default": null,
+            "description": "The viewer's own process id, listed in the terminal's `viewers`, so a\nterminal program hosting that process can tell which terminal it\nshows. It means something on the viewer's machine only.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         {
