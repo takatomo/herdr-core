@@ -898,11 +898,6 @@
               }
             ],
             "description": "With `wait`: how the wait ended (exit, a status, or timeout: still running)."
-          },
-          "waiting_for_person": {
-            "default": false,
-            "description": "An incoming message is held for the person's unsent draft (not composer detection).",
-            "type": "boolean"
           }
         },
         "required": [
@@ -950,15 +945,10 @@
               }
             ],
             "description": "With `wait`: how that turn ended."
-          },
-          "waited_for_person": {
-            "description": "True when delivery was held for a person's unsent draft.",
-            "type": "boolean"
           }
         },
         "required": [
-          "turn",
-          "waited_for_person"
+          "turn"
         ],
         "type": "object"
       },
@@ -1371,11 +1361,6 @@
               "$ref": "#/components/schemas/Viewing"
             },
             "type": "array"
-          },
-          "waiting_for_person": {
-            "default": false,
-            "description": "An incoming message is held for the person's unsent draft (not composer detection).",
-            "type": "boolean"
           }
         },
         "required": [
@@ -1484,7 +1469,7 @@
       "name": "Apache-2.0"
     },
     "title": "herdr-core",
-    "version": "0.1.17"
+    "version": "0.1.18"
   },
   "methods": [
     {
@@ -2448,7 +2433,7 @@
       }
     },
     {
-      "description": "Paste text and press Enter after the person submits or clears their draft (up to 3 min), then ~3 s quiet; keys a person presses meanwhile are held, then delivered. Refuses a blocked program unless `force`.",
+      "description": "Paste text and press Enter, once nobody has typed for ~3 s; keys a person presses meanwhile are held, then delivered. Refuses a blocked program unless `force`.",
       "errors": [
         {
           "code": -32000,
