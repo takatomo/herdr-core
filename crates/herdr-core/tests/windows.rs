@@ -4,7 +4,7 @@
 //! these cover what Windows does differently: pipes, ConPTY, job objects,
 //! Ctrl+C, handle inheritance, the console attach runs in.
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -590,6 +590,123 @@ fn interrupt_is_ctrl_c_the_program_takes() {
     s.shows(&t, "Reply from");
     s.json(&["interrupt", &t, "--timeout", "5"]);
     wait_until("ping stopped", || s.json(&["get", &t])["state"] == "finished");
+}
+
+#[test]
+fn planned_restarts_preserve_the_environment_for_new_terminals() {
+    let s = Session::new();
+    let exe = installed(&s);
+    let started = cmd_at(&exe, &s.name, &s.root)
+        .env_remove("NO_COLOR")
+        .env_remove("HC_UPDATER_ONLY")
+        .env("HC_SESSION_VALUE", "original")
+        .args(["server", "start"])
+        .output()
+        .unwrap();
+    assert!(started.status.success(), "{}", String::from_utf8_lossy(&started.stderr));
+    let probe =
+        s.file("environment.ps1", r#"Write-Output "ENV:$env:NO_COLOR|$env:HC_SESSION_VALUE|$env:HC_UPDATER_ONLY""#);
+    let new = release(&s.root.join("new"), "new-build");
+    for args in [vec!["server", "restart"], vec!["update", "--from", new.to_str().unwrap()]] {
+        let before = s.json(&["server", "status"])["pid"].clone();
+        let out = cmd_at(&exe, &s.name, &s.root)
+            .env("NO_COLOR", "1")
+            .env("HC_SESSION_VALUE", "updater")
+            .env("HC_UPDATER_ONLY", "leaked")
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert_ne!(s.json(&["server", "status"])["pid"], before);
+        let (code, out) = s.out(&["run", "--timeout", "15", "powershell", "-NoProfile", "-File", &probe]);
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("ENV:|original|"), "{args:?}: {out}");
+        let (directory, prefix) = herdr_core::platform::endpoints(&s.root);
+        let stream = herdr_core::platform::connect(&directory.join(format!("{prefix}{}.sock", s.name))).unwrap();
+        let terminal = herdr_core::client::call(
+            &stream,
+            "terminal.run",
+            json!({
+                "argv": ["powershell", "-NoProfile", "-File", probe],
+                "env": {"NO_COLOR": "1", "HC_SESSION_VALUE": "override"},
+            }),
+        )
+        .unwrap();
+        s.shows(terminal["address"].as_str().unwrap(), "ENV:1|override|");
+    }
+    s.json(&["server", "stop"]);
+    let out = cmd_at(&exe, &s.name, &s.root)
+        .env("NO_COLOR", "1")
+        .env("HC_SESSION_VALUE", "fresh")
+        .args(["server", "start"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let (_, out) = s.out(&["run", "--timeout", "15", "powershell", "-NoProfile", "-File", &probe]);
+    assert!(out.contains("ENV:1|fresh|"), "a fresh start uses its caller's environment: {out}");
+    let out = cmd_at(&exe, &s.name, &s.root).env_remove("NO_COLOR").args(["server", "restart"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let (_, out) = s.out(&["run", "--timeout", "15", "powershell", "-NoProfile", "-File", &probe]);
+    assert!(out.contains("ENV:1|fresh|"), "an intentional NO_COLOR survives restart: {out}");
+}
+
+#[test]
+fn a_copied_disks_restart_environment_does_not_replace_the_new_machines() {
+    let s = Session::new();
+    let machine = herdr_core::platform::machine_id().expect("Windows machine ID");
+    let state = s.root.join("state/herdr-core").join(&s.name);
+    std::fs::create_dir_all(&state).unwrap();
+    let snapshot = json!({
+        "machine_id": format!("other-{machine}"),
+        "boot_id": null,
+        "written_ms": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64,
+        "vars": [(std::ffi::OsString::from("HC_SESSION_VALUE"), std::ffi::OsString::from("copied-machine"))],
+    });
+    std::fs::write(state.join("restart-env.json"), serde_json::to_vec(&snapshot).unwrap()).unwrap();
+    let out = cmd(&s.name, &s.root).env("HC_SESSION_VALUE", "new-machine").args(["server", "start"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let (code, out) = s.out(&["run", "cmd", "/d", "/c", "echo %HC_SESSION_VALUE%"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("new-machine"), "{out}");
+}
+
+#[test]
+fn a_core_started_from_cmd_keeps_its_environment_across_restart() {
+    use std::os::windows::process::CommandExt;
+    let s = Session::new();
+    let mut launcher = Command::new("cmd");
+    launcher.current_dir(&s.root);
+    for (key, value) in cmd(&s.name, &s.root).get_envs() {
+        match value {
+            Some(value) => {
+                launcher.env(key, value);
+            }
+            None => {
+                launcher.env_remove(key);
+            }
+        }
+    }
+    // cd records cmd.exe's hidden =C: working-directory entry for the drive.
+    let script = format!("cd /d \"{}\" && \"{BIN}\" server start", s.root.display());
+    let out = launcher.env("HC_SESSION_VALUE", "saved-from-cmd").args(["/d", "/c"]).raw_arg(script).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = cmd(&s.name, &s.root).env("HC_SESSION_VALUE", "caller").args(["server", "restart"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let (code, out) = s.out(&["run", "cmd", "/d", "/c", "echo %HC_SESSION_VALUE%"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("saved-from-cmd"), "{out}");
+}
+
+#[test]
+fn a_failed_environment_handoff_still_restarts_the_core() {
+    let s = Session::new();
+    let before = s.json(&["server", "start"])["pid"].clone();
+    let blocked = s.root.join("state/herdr-core").join(&s.name).join("restart-env.json");
+    std::fs::create_dir(&blocked).unwrap();
+    let (code, _) = s.out(&["server", "restart"]);
+    assert_eq!(code, 0);
+    assert_ne!(s.json(&["server", "status"])["pid"], before);
+    std::fs::remove_dir(blocked).unwrap();
 }
 
 #[test]

@@ -252,6 +252,25 @@ paths start at your current folder. Prefer explicit paths for remote work.
   app doesn't end terminals. SSH starts stay direct. If launchd fails, startup
   falls back to a direct child and logs the reason in `core.log`; that core may
   end with its launching app.
+- Updates and `hc server restart` keep the environment the core started with;
+  stopping and starting takes a fresh one. Per-terminal API `env` overrides still
+  apply, as do Linux session and Windows registry refreshes. SIGTERM hands over
+  terminals/screens but does not save an environment. Preservation is best effort:
+  a failed save never blocks a restart. The private handoff expires after three
+  minutes and cannot cross a Linux/macOS boot. Windows checks age, not the boot:
+  a requested restart interrupted by a fast reboot can reuse it once. Session
+  paths (HOME, XDG, HC_SESSION, HC_SOCKET) and service bookkeeping stay with the
+  new launcher. On macOS, SSH versus launchd is still chosen by that launcher,
+  not by the saved environment. The update from an older core to 0.1.19 takes the
+  updater's environment once: older cores can't write the note for their successor.
+- On Unix, exit, `hc kill`, pane close and server stop do not sweep detached
+  processes. They hang up the terminal and end its own program and foreground
+  job; deliberately detached programs can survive (background server ports may
+  stay busy). Child terminals still end with their parent unless
+  `--outlive-parent`. Unexpected holder loss still sweeps inherited cleanup
+  tokens, including detached programs; Windows keeps job-object cleanup.
+  Terminals kept alive through an update retain their old holder's behavior
+  until recreated.
 - Never `hc server stop` or restart the user's core unless asked. It affects
   every terminal. Tests need their own `HC_SESSION` and scratch XDG paths.
 - Errors are `{error: {kind, message, hint}}` on stderr. Exit codes include

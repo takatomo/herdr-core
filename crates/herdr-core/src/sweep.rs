@@ -1,7 +1,6 @@
-//! Ending everything a terminal started. Each terminal's environment carries
-//! a random token that its descendants inherit, even those that leave its
-//! session (agents' tool shells do), so the token finds them all. A process
-//! that both leaves the session and drops its environment escapes: accepted.
+//! Cleanup for exec requests and terminals abandoned by a lost holder, never
+//! normal terminal ends. Inherited tokens find even detached descendants.
+//! A process that leaves the session and drops its environment escapes.
 //! An exec's record also names the leader of its process group, so a crashed
 //! core's next start ends that group too, but only while the leader is
 //! provably the process the exec started.
@@ -56,7 +55,7 @@ pub enum Outcome {
     Keep,
 }
 
-/// A fresh token for one terminal, stamped with when it was made: no process
+/// A fresh cleanup token, stamped with when it was made: no process
 /// started before it can carry it, so a sweep need not read those.
 pub fn token() -> String {
     format!("{}-{}", now(), crate::platform::random_hex())

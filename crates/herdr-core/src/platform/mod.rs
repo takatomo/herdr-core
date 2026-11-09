@@ -170,6 +170,52 @@ pub fn utf8_vars() -> impl Iterator<Item = (String, String)> {
     std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
 }
 
+/// Application settings survive a restart; session paths and lifecycle marks do not move.
+pub(crate) fn restored_environment(
+    saved: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    current: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString> {
+    use std::ffi::OsStr;
+    let named = |key: &OsStr, name: &str| {
+        if cfg!(windows) { key.eq_ignore_ascii_case(OsStr::new(name)) } else { key == name }
+    };
+    let local = |key: &OsStr| {
+        let paths = [
+            "HOME",
+            "USERPROFILE",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "XDG_STATE_HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_RUNTIME_DIR",
+            "HC_SESSION",
+            "HC_SOCKET",
+        ];
+        #[allow(unused_mut)]
+        let mut keep = paths.iter().any(|name| named(key, name));
+        #[cfg(target_os = "linux")]
+        {
+            keep |= systemd::SERVICE.iter().any(|name| named(key, name));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            keep |= named(key, "XPC_SERVICE_NAME");
+        }
+        keep
+    };
+    let discarded = |key: &OsStr| {
+        [crate::sweep::VAR, crate::sweep::RUNTIME, "HC_LAUNCHD_DIRECT", "HC_LAUNCHD_DETACH", "_HC_RESPONSIBLE_PID"]
+            .iter()
+            .any(|name| named(key, name))
+    };
+    let mut env: std::collections::BTreeMap<_, _> =
+        saved.into_iter().filter(|(key, _)| !local(key) && !discarded(key)).collect();
+    env.extend(current.into_iter().filter(|(key, _)| local(key) && !discarded(key)));
+    env.insert(crate::sweep::RUNTIME.into(), "1".into());
+    env
+}
+
 /// The core's environment as programs get it: never an ssh login's marks,
 /// and on Linux the login session as the user manager has it now.
 pub async fn program_env() -> std::collections::BTreeMap<String, String> {
@@ -213,3 +259,7 @@ pub mod signal {
     pub const KILL: i32 = 9;
     pub const TERM: i32 = 15;
 }
+
+#[cfg(test)]
+#[path = "environment_tests.rs"]
+mod environment_tests;
