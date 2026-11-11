@@ -68,10 +68,16 @@ fn root_agent_keeps_status_when_a_foreground_tool_returns() {
 fn a_shell_that_execs_an_agent_keeps_its_status() {
     let mut s = Session::new();
     s.env.push(("HC_FOREGROUND_MS".into(), "50".into()));
-    let agent = executable(&s, &format!("#!/bin/sh\n{}", script(&s, "r state=working; read -r action")));
+    let agent =
+        executable(&s, &format!("#!/bin/sh\n{}", script(&s, "r state=working; w reported; cd /; read -r action")));
     let t = run(&s, &["sh", "-c", &format!("exec {agent}")]);
+    // A new program can be slow to start (macOS checks it first): the root is
+    // looked at again only after its report, which its move to `/` shows.
+    wait_until("agent status", || get(&s, &t)["status"]["state"] == "working");
+    touch(&s, "reported");
     wait_until("agent is the root program", || {
-        get(&s, &t)["foreground"]["argv"].as_array().is_some_and(|argv| argv.contains(&json!(agent)))
+        let fg = get(&s, &t)["foreground"].clone();
+        fg["cwd"] == "/" && fg["argv"].as_array().is_some_and(|argv| argv.contains(&json!(agent)))
     });
     assert_eq!(get(&s, &t)["status"]["state"], "working");
 }
@@ -109,10 +115,16 @@ fn child_exit_before_a_foreground_sample_still_clears_status() {
 fn a_shell_script_root_keeps_its_agents_status() {
     let mut s = Session::new();
     s.env.push(("HC_FOREGROUND_MS".into(), "50".into()));
-    let agent = executable(&s, &format!("#!/bin/sh\n{}", script(&s, "r state=working; read -r action")));
-    let wrapper = executable(&s, &format!("#!/bin/bash\n{agent}\n"));
+    let agent = executable(&s, &format!("#!/bin/sh\n{}", script(&s, "r state=working; w done")));
+    // The agent stays alive beside the script, which moves to `/` once the test saw the report.
+    let wrapper = executable(&s, &format!("#!/bin/bash\n{agent} &\n{}\n", script(&s, "w reported; cd /; wait")));
     let t = run(&s, &["bash", &wrapper]);
-    wait_until("script root is foreground", || get(&s, &t)["foreground"]["pid"] == get(&s, &t)["pid"]);
+    wait_until("agent status", || get(&s, &t)["status"]["state"] == "working");
+    touch(&s, "reported");
+    wait_until("script root is foreground", || {
+        let terminal = get(&s, &t);
+        terminal["foreground"]["cwd"] == "/" && terminal["foreground"]["pid"] == terminal["pid"]
+    });
     assert_eq!(get(&s, &t)["status"]["state"], "working");
 }
 

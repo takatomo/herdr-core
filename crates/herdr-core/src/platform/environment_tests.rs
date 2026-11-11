@@ -106,6 +106,12 @@ fn a_restart_refreshes_only_a_dead_saved_ssh_agent_socket() {
     assert_eq!(live.get(OsStr::new("SSH_AUTH_SOCK")), Some(&path.clone().into_os_string()));
     // The file stays behind, as after a logout, but nothing answers.
     drop(socket);
+    // A program another test is starting keeps a copy of the listener until it execs.
+    let closed = std::time::Instant::now();
+    while std::os::unix::net::UnixStream::connect(&path).is_ok() {
+        assert!(closed.elapsed() < std::time::Duration::from_secs(10), "the dropped listener still answers");
+        std::thread::yield_now();
+    }
     let stale = restore(launcher.clone());
     assert_eq!(stale.get(OsStr::new("SSH_AUTH_SOCK")).unwrap(), "/new-agent");
     std::fs::remove_file(&path).unwrap();
