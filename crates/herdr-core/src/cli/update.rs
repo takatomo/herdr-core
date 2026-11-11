@@ -77,9 +77,9 @@ pub(super) fn update(paths: &Paths, from: &std::path::Path, force: bool) -> Resu
     }
     // Staged beside it, checked, then swapped in: never a half-written hc.
     crate::platform::swap_in(from, &dest, |staged| version_of(staged).as_deref() == Some(now.as_str())).map_err(
-        |e| match (e.kind(), crate::platform::bundle_update_hint()) {
+        |e| match (e.kind(), crate::platform::bundle_update_hint(&dest)) {
             (std::io::ErrorKind::InvalidData, _) => refused(format!("the copy of {} does not run", from.display()), ""),
-            (std::io::ErrorKind::InvalidInput, Some(hint)) => refused(e.to_string(), hint),
+            (std::io::ErrorKind::InvalidInput, Some(hint)) => refused(e.to_string(), &hint),
             _ => RpcError::internal(format!("cannot replace {shown}: {e}")),
         },
     )?;

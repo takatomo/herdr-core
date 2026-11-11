@@ -86,6 +86,7 @@ fn a_custom_named_bundle_installs_serves_and_updates_as_one_app() {
 
     let (_, err) = s.err(&["update", "--from", BIN]);
     assert_eq!(err["error"]["kind"], "refused", "a bare executable never replaces the app: {err}");
+    assert_eq!(err["error"]["hint"], "use --from 'hc.app' (its Contents/MacOS/hc also works)", "{err}");
 }
 
 #[test]

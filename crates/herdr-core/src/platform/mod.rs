@@ -183,9 +183,13 @@ pub fn update_source(path: &std::path::Path) -> std::path::PathBuf {
     path.to_path_buf()
 }
 
-pub fn bundle_update_hint() -> Option<&'static str> {
-    cfg!(target_os = "macos")
-        .then_some("use hc update, or --from 'Herdr Core.app' (its Contents/MacOS/herdr-core also works)")
+/// What updates the core app `exe` is the main executable of, in that app's own names.
+pub fn bundle_update_hint(exe: &std::path::Path) -> Option<String> {
+    let app = core_bundle(exe).filter(|_| cfg!(target_os = "macos"))?.file_name()?.to_string_lossy();
+    // A release brings upstream's app, and an update never swaps one app for another.
+    let release = if app == "Herdr Core.app" { "hc update, or " } else { "" };
+    let name = exe.file_name()?.to_string_lossy();
+    Some(format!("use {release}--from '{app}' (its Contents/MacOS/{name} also works)"))
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]

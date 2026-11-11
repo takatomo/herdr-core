@@ -440,6 +440,19 @@ mod tests {
         }
     }
     #[test]
+    fn a_refused_bare_executable_is_answered_with_the_names_of_the_app_in_use() {
+        let hint = |exe: &str| super::super::bundle_update_hint(Path::new(exe));
+        assert_eq!(
+            hint("/share/active/Herdr Core.app/Contents/MacOS/herdr-core").as_deref(),
+            Some("use hc update, or --from 'Herdr Core.app' (its Contents/MacOS/herdr-core also works)")
+        );
+        // A release brings upstream's app, which never replaces another one: no plain `hc update` there.
+        assert_eq!(
+            hint("/Applications/hc.app/Contents/MacOS/hc").as_deref(),
+            Some("use --from 'hc.app' (its Contents/MacOS/hc also works)")
+        );
+    }
+    #[test]
     fn an_app_named_after_its_executable_is_a_core_bundle_and_a_host_app_is_not() {
         assert_eq!(
             bundle(Path::new("/Applications/hc.app/Contents/MacOS/hc")),
