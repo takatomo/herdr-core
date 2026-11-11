@@ -165,6 +165,8 @@ fn a_package_managers_seal_on_the_source_app_stays_behind_where_hc_installs_it()
     let app = sealed.parent().unwrap().parent().unwrap().to_str().unwrap();
     // What hc installed is hc's to update, here and on a machine.
     let update = local.hc(&["--json", "update", "--from", app]);
+    // The sealed app itself goes to the machine, as from the package manager's own install.
+    local.bin = source.clone();
     let add = local.hc(&["--json", "machine", "add", "bare", "--install"]);
     let again = local.hc(&["--json", "machine", "update", "bare"]);
     let still_sealed = std::fs::metadata(sealed).unwrap().permissions().mode() & 0o222 == 0;
