@@ -7,6 +7,20 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
+pub fn check_via(_target: &str) -> io::Result<()> {
+    Ok(())
+}
+
+pub fn via_add_hint(target: &str) -> String {
+    format!("hc machine add --via '{}' --name <name>", target.replace('\'', r"'\''"))
+}
+
+pub fn via_command(target: &str, line: &str) -> io::Result<Command> {
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(format!("{target} \"$1\"")).arg("sh").arg(line);
+    Ok(cmd)
+}
+
 // --- Connections -----------------------------------------------------------
 
 /// A connection to a core or a holder (blocking).
@@ -52,6 +66,24 @@ pub fn listen(path: &Path) -> io::Result<Listener> {
 
 pub type AsyncRead = tokio::net::unix::OwnedReadHalf;
 pub type AsyncWrite = tokio::net::unix::OwnedWriteHalf;
+
+/// Read EOF can be a caller's SHUT_WR: probe the reply side without sending bytes.
+pub async fn reply_closed(read: &AsyncRead) {
+    loop {
+        let result = unsafe {
+            libc::send(read.as_ref().as_raw_fd(), std::ptr::null(), 0, libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL)
+        };
+        if result < 0
+            && matches!(
+                io::Error::last_os_error().raw_os_error(),
+                Some(libc::EPIPE | libc::ECONNRESET | libc::ENOTCONN)
+            )
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
 
 /// The core's socket for clients.
 pub struct AsyncListener(tokio::net::UnixListener);
@@ -171,6 +203,8 @@ mod nofile_tests {
 /// won't end it), stdin/stdout to /dev/null, stderr to `log`.
 pub fn spawn_detached(mut cmd: Command, log: std::fs::File) -> io::Result<()> {
     use std::process::Stdio;
+    #[cfg(target_os = "macos")]
+    cmd.env_remove("XPC_FLAGS");
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(log);
     unsafe {
         cmd.pre_exec(|| {
