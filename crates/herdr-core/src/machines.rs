@@ -499,7 +499,7 @@ pub fn install(paths: &crate::paths::Paths, to: Reach, session: Option<&str>) ->
     let current = std::env::current_exe()
         .and_then(|path| path.canonicalize())
         .map_err(|e| RpcError::internal(format!("cannot find this hc: {e}")))?;
-    let bin = if there == here && (bundle || !current.ends_with("Herdr Core.app/Contents/MacOS/herdr-core")) {
+    let bin = if there == here && (bundle || crate::platform::core_bundle(&current).is_none()) {
         current
     } else {
         let version = env!("CARGO_PKG_VERSION");
@@ -516,18 +516,18 @@ pub fn install(paths: &crate::paths::Paths, to: Reach, session: Option<&str>) ->
     let (exe, bundled) = install_payload(&bin, &scratch.0)?;
     let n = exe.len();
     let session = session.map(|s| format!("HC_SESSION={s} ")).unwrap_or_default();
-    if bundled {
+    if let Some(inside) = bundled {
         let script = format!(
             "set -e; d=$HOME/.local/bin; mkdir -p \"$d\"; t=$(mktemp -d); trap \"rm -rf \\\"$t\\\"\" EXIT; \
              head -c {n} > \"$t/core.tar\"; [ $(wc -c < \"$t/core.tar\") -eq {n} ]; \
-             tar -xf \"$t/core.tar\" -C \"$t\"; b=\"$t/Herdr Core.app/Contents/MacOS/herdr-core\"; \
+             tar -xf \"$t/core.tar\" -C \"$t\"; b=\"$t/{inside}\"; \
              \"$b\" --hc-install-bundle \"$b\" \"$d/herdr-core\"; \
              {session}\"$d/herdr-core\" server restart > /dev/null; \"$d/herdr-core\" --version"
         );
         return run_there(paths, to, &format!("sh -c '{script}'"), &exe);
     }
     let guard = if macos {
-        "case $(readlink \"$d/herdr-core\" || true) in */Contents/MacOS/herdr-core) \
+        "case $(readlink \"$d/herdr-core\" || true) in */Contents/MacOS/*) \
          echo \"a bundled remote core needs a complete bundle; run hc update on that machine\" >&2; exit 5;; esac; "
     } else {
         ""
@@ -543,17 +543,28 @@ pub fn install(paths: &crate::paths::Paths, to: Reach, session: Option<&str>) ->
     run_there(paths, to, &format!("sh -c '{script}'"), &exe)
 }
 
-fn install_payload(bin: &Path, scratch: &Path) -> Result<(Vec<u8>, bool), RpcError> {
-    let bundled = bin.ends_with("Herdr Core.app/Contents/MacOS/herdr-core");
-    let path = if bundled {
-        let root = bin.parent().unwrap().parent().unwrap().parent().unwrap();
+/// What goes to the machine: the bare executable, or its whole app as a tar
+/// with the executable's path inside it (`Herdr Core.app/Contents/MacOS/herdr-core`).
+fn install_payload(bin: &Path, scratch: &Path) -> Result<(Vec<u8>, Option<String>), RpcError> {
+    let root = crate::platform::core_bundle(bin);
+    let name = |path: &Path| path.file_name().unwrap().to_string_lossy().into_owned();
+    let bundled = root.map(|root| format!("{}/Contents/MacOS/{}", name(root), name(bin)));
+    // The path is written into a shell line there: plain names only.
+    if bundled.as_ref().is_some_and(|p| !p.chars().all(|c| c.is_ascii_alphanumeric() || " ._-/".contains(c))) {
+        return Err(RpcError::new(
+            "install_failed",
+            format!("{} has a name that cannot be sent to a machine", root.unwrap().display()),
+            "install hc there yourself",
+        ));
+    }
+    let path = if let Some(root) = root {
         let archive = scratch.join("core-bundle.tar");
         let status = std::process::Command::new("tar")
             .arg("-cf")
             .arg(&archive)
             .arg("-C")
             .arg(root.parent().unwrap())
-            .arg("Herdr Core.app")
+            .arg(root.file_name().unwrap())
             .env("COPYFILE_DISABLE", "1")
             .status()
             .map_err(|e| RpcError::internal(e.to_string()))?;

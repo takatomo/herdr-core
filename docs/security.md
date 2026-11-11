@@ -109,3 +109,5 @@ With the default release service, the installer and `hc update` refuse the bundl
 Once hc runs from the bundle, an update will not replace it with a bare executable.
 As root or outside your home folder, they install the plain `herdr-core` executable, checked only by its SHA-256.
 With another `HERDR_RELEASES_URL`, or `hc update --from` a bundle, an ad-hoc signature with that identifier is enough, so that service or file is trusted as it is.
+A bundle someone else built and signed, named after its executable (`hc.app/Contents/MacOS/hc`), is accepted there when `codesign` finds it meets the running hc's own designated requirement: the same identifier and signer.
+An update never replaces a bundle with one of another name, so a release does not take over such a build.

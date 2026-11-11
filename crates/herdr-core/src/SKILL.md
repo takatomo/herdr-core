@@ -259,7 +259,10 @@ paths start at your current folder. Prefer explicit paths for remote work.
   `~/.local/bin` (`HC_INSTALL_DIR` overrides the links'
   folder). Updates keep running terminals. A bundled install's `update --from`
   needs a complete signed `.app` (or its `Contents/MacOS/herdr-core`), not a bare
-  executable. Terminals created before this bundle
+  executable. An app someone else built, named after its executable
+  (`hc.app/Contents/MacOS/hc`), installs, updates and reaches machines the
+  same way under its own name; an update never swaps one app for another.
+  Terminals created before this bundle
   upgrade may still have broken macOS privacy access: recreate those terminals;
   restarting only the core cannot repair their old holders. After an old updater
   copies only the binary, run `hc update` to finish installing the bundle, even

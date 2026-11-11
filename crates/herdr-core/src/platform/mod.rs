@@ -98,6 +98,29 @@ pub(crate) fn raise_nofile_limit() {
     }
 }
 
+/// The app `exe` is the main executable of: upstream's
+/// `Herdr Core.app/Contents/MacOS/herdr-core`, or an app someone else built and
+/// named after its executable (`hc.app/Contents/MacOS/hc`). An hc carried
+/// inside a host app is neither. Decided from the path alone, on every OS: a
+/// macOS app is also packed for a machine from Linux.
+pub fn core_bundle(exe: &std::path::Path) -> Option<&std::path::Path> {
+    use std::path::Path;
+    let root = exe.parent()?.parent()?.parent()?;
+    let (app, name) = (Path::new(root.file_name()?), exe.file_name()?);
+    let ours = (app == Path::new("Herdr Core.app") && name == "herdr-core")
+        || (app.extension()? == "app" && app.file_stem()? == name);
+    (ours && exe.strip_prefix(root).ok()? == Path::new("Contents/MacOS").join(name)).then_some(root)
+}
+
+/// The main executable of the core app at `app`: what `core_bundle` reads back.
+pub fn bundle_executable(app: &std::path::Path) -> std::path::PathBuf {
+    let name = match app.file_name() {
+        Some(name) if name == "Herdr Core.app" => "herdr-core".into(),
+        _ => app.file_stem().unwrap_or_default().to_owned(),
+    };
+    app.join("Contents/MacOS").join(name)
+}
+
 pub fn core_executable(exe: &std::path::Path) -> std::path::PathBuf {
     #[cfg(target_os = "macos")]
     {
@@ -155,7 +178,7 @@ pub fn spawn_core_job(cmd: &mut std::process::Command, log: &std::path::Path) ->
 pub fn update_source(path: &std::path::Path) -> std::path::PathBuf {
     #[cfg(target_os = "macos")]
     if path.is_dir() {
-        return path.join(macos_bundle::EXECUTABLE);
+        return bundle_executable(path);
     }
     path.to_path_buf()
 }

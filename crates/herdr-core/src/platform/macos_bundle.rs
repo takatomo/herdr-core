@@ -4,15 +4,13 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const EXECUTABLE: &str = "Contents/MacOS/herdr-core";
 const REQUIREMENT: &str =
     "=identifier \"dev.herdr.core\" and anchor apple generic and certificate leaf[subject.OU] = \"2W9652Q7QR\"";
 const LSREGISTER: &str =
     "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
 
 fn bundle(exe: &Path) -> Option<&Path> {
-    let root = exe.parent()?.parent()?.parent()?;
-    (exe.strip_prefix(root).ok()? == Path::new(EXECUTABLE) && root.file_name()? == "Herdr Core.app").then_some(root)
+    super::core_bundle(exe)
 }
 
 fn checked(program: &str, args: &[&std::ffi::OsStr]) -> io::Result<()> {
@@ -37,11 +35,30 @@ pub fn verify(path: &Path, local: bool) -> io::Result<()> {
     // Explicit local builds can be ad-hoc, but another team's signature is never ours.
     if local {
         let out = Command::new("/usr/bin/codesign").arg("-dv").arg(path).output()?;
-        if String::from_utf8_lossy(&out.stderr).lines().any(|line| line == "Signature=adhoc") {
-            return verify("=identifier \"dev.herdr.core\"");
+        if String::from_utf8_lossy(&out.stderr).lines().any(|line| line == "Signature=adhoc")
+            && verify("=identifier \"dev.herdr.core\"").is_ok()
+        {
+            return Ok(());
+        }
+        // An app someone else built and signed is ours when macOS takes it for this very app.
+        if own_requirement().is_some_and(|own| verify(&format!("={own}")).is_ok()) {
+            return Ok(());
         }
     }
-    Err(io::Error::other("expected Herdr's Developer ID signature (dev.herdr.core, team 2W9652Q7QR)"))
+    Err(io::Error::other("expected Herdr's Developer ID signature (dev.herdr.core, team 2W9652Q7QR), or this hc's own"))
+}
+
+/// This hc's designated requirement: what macOS checks to call other code the same app
+/// (its identifier and signer; for an ad-hoc signature, this exact code).
+fn own_requirement() -> Option<String> {
+    let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
+    let out = Command::new("/usr/bin/codesign").args(["-d", "-r-"]).arg(bundle(&exe).unwrap_or(&exe)).output().ok()?;
+    requirement(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// An explicit requirement prints as `designated => …`, an implicit one as a comment.
+fn requirement(shown: &str) -> Option<String> {
+    shown.lines().find_map(|line| line.trim_start_matches("# ").strip_prefix("designated => ")).map(String::from)
 }
 
 struct Link {
@@ -186,12 +203,24 @@ pub fn install(source: &Path, dest: &Path, works: impl Fn(&Path) -> bool) -> io:
             dest.display()
         )));
     }
+    let executable = source;
     let source = bundle(source).ok_or_else(|| io::Error::other("source is not a core app bundle"))?;
+    // The app's own names, wherever it comes from: `Herdr Core.app` and `Contents/MacOS/herdr-core` upstream.
+    let name = source.file_name().unwrap();
+    let executable = executable.strip_prefix(source).unwrap();
     verify(source, true)?;
     let enclosing_app = dest.ancestors().find(|p| p.extension().is_some_and(|e| e == "app"));
     if let Some(app) = enclosing_app {
         if bundle(dest) != Some(app) {
             return Err(io::Error::other("refusing to replace a host application"));
+        }
+        // Another app has another identity: its privacy grants and its build's features would not carry over.
+        if app.file_name() != Some(name) {
+            return Err(io::Error::other(format!(
+                "refusing to replace {} with {}: an update keeps the same app",
+                app.file_name().unwrap().display(),
+                name.display()
+            )));
         }
         verify(app, true)?;
     }
@@ -210,17 +239,17 @@ pub fn install(source: &Path, dest: &Path, works: impl Fn(&Path) -> bool) -> io:
     }
     let versions = base.join("versions");
     let current = base.join("current");
-    let legacy = base.join("Herdr Core.app");
+    let legacy = base.join(name);
     std::fs::create_dir_all(&versions)?;
-    let active = base.join("active/Herdr Core.app");
+    let active = base.join("active").join(name);
     std::fs::create_dir_all(active.parent().unwrap())?;
     // Keep the installed version even when no core is running. An unreadable
     // process means nothing is reclaimed, rather than risking a live bundle.
     let live = live_executables().and_then(|mut live| {
         if let Ok(path) = current.canonicalize() {
-            live.push(path.join(EXECUTABLE));
+            live.push(path.join(executable));
         }
-        live.push(source.join(EXECUTABLE).canonicalize()?);
+        live.push(source.join(executable).canonicalize()?);
         if bundle(dest).is_some() {
             live.push(dest.to_path_buf());
         }
@@ -245,7 +274,7 @@ pub fn install(source: &Path, dest: &Path, works: impl Fn(&Path) -> bool) -> io:
         if ours || (hc.symlink_metadata().is_err() && !on_path) {
             entries.push(hc);
         }
-    } else if dest != active.join(EXECUTABLE) {
+    } else if dest != active.join(executable) {
         // Aliases to active survive swaps; only migrate aliases from older layouts.
         let mut dirs = vec![home.join(".local/bin")];
         if let Some(dir) = std::env::var_os("HC_INSTALL_DIR") {
@@ -266,17 +295,17 @@ pub fn install(source: &Path, dest: &Path, works: impl Fn(&Path) -> bool) -> io:
     }
     let slot = versions.join(super::random_hex());
     std::fs::create_dir(&slot)?;
-    let staged = slot.join("Herdr Core.app");
+    let staged = slot.join(name);
     let mut activated = false;
     let result = (|| {
         checked("/usr/bin/ditto", &[source.as_os_str(), staged.as_os_str()])?;
         verify(&staged, true)?;
-        if !works(&staged.join(EXECUTABLE)) {
+        if !works(&staged.join(executable)) {
             return Err(io::ErrorKind::InvalidData.into());
         }
         let mut links = Vec::new();
         for (target, entry) in std::iter::once((active.clone(), current.clone()))
-            .chain(entries.into_iter().map(|entry| (current.join(EXECUTABLE), entry)))
+            .chain(entries.into_iter().map(|entry| (current.join(executable), entry)))
             .chain(legacy.symlink_metadata().is_err().then(|| (current.clone(), legacy.clone())))
         {
             if let Some(link) = Link::stage(&target, &entry)? {
@@ -316,7 +345,7 @@ pub fn install(source: &Path, dest: &Path, works: impl Fn(&Path) -> bool) -> io:
 pub fn core_executable(exe: &Path) -> PathBuf {
     if let Some(root) = bundle(exe) {
         let base = base_directory(root);
-        let current = base.join("current").join(EXECUTABLE);
+        let current = base.join("current").join(exe.strip_prefix(root).unwrap());
         if current.is_file() && verify(&base.join("current"), true).is_ok() {
             return current;
         }
@@ -402,6 +431,27 @@ mod tests {
         }
     }
     #[test]
+    fn an_app_named_after_its_executable_is_a_core_bundle_and_a_host_app_is_not() {
+        assert_eq!(
+            bundle(Path::new("/Applications/hc.app/Contents/MacOS/hc")),
+            Some(Path::new("/Applications/hc.app"))
+        );
+        for path in
+            ["/Host.app/Contents/MacOS/hc", "/hc.app/Contents/Resources/hc", "/hc/Contents/MacOS/hc", "/hc.app/hc"]
+        {
+            assert!(bundle(Path::new(path)).is_none(), "{path}");
+        }
+    }
+
+    #[test]
+    fn a_designated_requirement_is_read_whether_explicit_or_implied() {
+        let explicit = "designated => identifier \"x.hc\" and anchor apple generic\n";
+        assert_eq!(requirement(explicit).unwrap(), "identifier \"x.hc\" and anchor apple generic");
+        assert_eq!(requirement("# designated => cdhash H\"ab12\"\n").unwrap(), "cdhash H\"ab12\"");
+        assert_eq!(requirement("host => anchor apple\n"), None);
+    }
+
+    #[test]
     fn only_missing_processes_or_executables_are_safe_to_skip() {
         for code in [libc::ESRCH, libc::ENOENT] {
             assert!(executable_is_gone(&io::Error::from_raw_os_error(code)), "errno {code}");
@@ -458,7 +508,7 @@ mod tests {
         // Unknown process inventory must preserve it, just like a live holder.
         reclaim(&versions, Err(io::Error::other("unreadable process"))).unwrap();
         assert!(second.exists());
-        reclaim(&versions, Ok(vec![second.join(EXECUTABLE)])).unwrap();
+        reclaim(&versions, Ok(vec![second.join("Contents/MacOS/herdr-core")])).unwrap();
         assert!(second.exists());
         reclaim(&versions, Ok(vec![])).unwrap();
         assert!(!second.exists());
