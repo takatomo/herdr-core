@@ -120,6 +120,25 @@ async fn server_exit_writes_what_was_saved_during_its_last_flush_and_nothing_aft
 }
 
 #[tokio::test]
+async fn ending_no_terminals_writes_no_registry() {
+    let (mut core, root) = test_core();
+    core.flush_saved().await.unwrap();
+    let (wrote, writes) = mpsc::channel();
+    Arc::get_mut(&mut core).unwrap().registry_writer = RegistryWriter::start(move |_| {
+        let _ = wrote.send(());
+        Ok(())
+    })
+    .unwrap();
+    // What every finished terminal without children to end asks for.
+    core.kill(&[]).await;
+    core.flush_saved().await.unwrap();
+    let rewritten = writes.try_recv().is_ok();
+    drop(core);
+    remove_root(&root);
+    assert!(!rewritten, "nothing ended and nothing changed, yet the registry was written again");
+}
+
+#[tokio::test]
 async fn server_stop_succeeds_even_when_the_registry_flush_times_out() {
     let (mut core, root) = test_core();
     core.flush_saved().await.unwrap();

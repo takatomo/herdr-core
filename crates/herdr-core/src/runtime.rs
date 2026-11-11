@@ -836,6 +836,11 @@ impl Core {
 
     /// Hang up, then escalate. Returns once the program ended or KILL timed out.
     pub async fn kill(&self, ids: &[u32]) {
+        // Every finished terminal asks for this, most with no children to end:
+        // nothing ends and no record changes, so there is nothing to save.
+        if ids.is_empty() {
+            return;
+        }
         let all_done = |st: &State| {
             ids.iter().all(|id| !st.reg.terminals.get(id).is_some_and(|t| t.is_live() && t.holder.is_some()))
         };
