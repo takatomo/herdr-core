@@ -244,6 +244,13 @@ impl Core {
             .map_err(|e| crate::rpc::RpcError::internal(format!("cannot save terminals: {e}")))
     }
 
+    /// The core's last flush, as it exits: tasks still running save while it waits, and
+    /// those are written too. Nothing is written after it, so whoever stopped the core
+    /// can delete its state. False when a stuck disk timed it out.
+    pub async fn close_saved(&self) -> bool {
+        tokio::time::timeout(Duration::from_secs(10), self.registry_writer.close()).await.is_ok()
+    }
+
     /// For frequent changes a crash may lose (the next start rebuilds them):
     /// saved within `SAVE_SOON`, once for a burst. Call with the lock held.
     pub fn save_soon(&self) {

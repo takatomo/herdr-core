@@ -68,13 +68,25 @@ impl RegistryWriter {
             .map_err(|_| io::Error::other("registry writer stopped"))?;
         Ok(())
     }
+
+    /// The last flush: also writes what is saved while it waits, then the writer ends.
+    /// Nothing saved after it is written. Never hold the core lock.
+    pub async fn close(&self) {
+        self.end();
+        // The worker owns the sender: it is gone once the queue is written out.
+        let _ = self.completed.clone().wait_for(|_| false).await;
+    }
+
+    fn end(&self) {
+        let (mutex, changed) = &*self.queue;
+        mutex.lock().unwrap().closed = true;
+        changed.notify_one();
+    }
 }
 
 impl Drop for RegistryWriter {
     fn drop(&mut self) {
-        let (mutex, changed) = &*self.queue;
-        mutex.lock().unwrap().closed = true;
-        changed.notify_one();
+        self.end();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }

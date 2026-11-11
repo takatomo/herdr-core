@@ -83,6 +83,43 @@ async fn server_exit_flushes_even_when_background_tasks_still_own_core() {
 }
 
 #[tokio::test]
+async fn server_exit_writes_what_was_saved_during_its_last_flush_and_nothing_after() {
+    let (mut core, root) = test_core();
+    core.flush_saved().await.unwrap();
+    let (started, writes) = mpsc::channel();
+    let (release, blocked) = mpsc::channel();
+    Arc::get_mut(&mut core).unwrap().registry_writer = RegistryWriter::start(move |_| {
+        started.send(()).unwrap();
+        blocked.recv_timeout(Duration::from_secs(5)).unwrap();
+        Ok(())
+    })
+    .unwrap();
+    let background_owner = core.clone();
+    core.save(&core.lock());
+    writes.recv_timeout(Duration::from_secs(5)).unwrap();
+    let finish = crate::server::finish(&core);
+    tokio::pin!(finish);
+    assert!(tokio::time::timeout(Duration::from_millis(10), &mut finish).await.is_err());
+    // A task still running (a finished terminal's cleanup) saves while the last flush waits.
+    background_owner.save(&background_owner.lock());
+    release.send(()).unwrap();
+    writes.recv_timeout(Duration::from_secs(5)).unwrap();
+    let waited = tokio::time::timeout(Duration::from_millis(10), &mut finish).await.is_err();
+    release.send(()).unwrap();
+    if waited {
+        finish.await.unwrap();
+    }
+    // Whoever stopped the core may delete its state now: nothing writes there any more.
+    background_owner.save(&background_owner.lock());
+    let late = writes.recv_timeout(Duration::from_millis(50)).is_ok();
+    let _ = release.send(());
+    drop(background_owner);
+    remove_root(&root);
+    assert!(waited, "serve returned while a snapshot saved during its last flush was being written");
+    assert!(!late, "a snapshot was written after serve's last flush");
+}
+
+#[tokio::test]
 async fn server_stop_succeeds_even_when_the_registry_flush_times_out() {
     let (mut core, root) = test_core();
     core.flush_saved().await.unwrap();

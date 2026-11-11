@@ -107,8 +107,8 @@ pub(crate) async fn finish(core: &Core) -> io::Result<()> {
     if core.restart.load(std::sync::atomic::Ordering::SeqCst) {
         core.handover().await?;
     }
-    if let Err(e) = core.flush_saved().await {
-        eprintln!("core: final registry flush failed: {}", e.message);
+    if !core.close_saved().await {
+        eprintln!("core: final registry flush failed: registry persistence timed out");
     }
     Ok(())
 }
