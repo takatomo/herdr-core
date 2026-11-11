@@ -209,18 +209,22 @@ pub fn install(source: &Path, dest: &Path, works: impl Fn(&Path) -> bool) -> io:
     let name = source.file_name().unwrap();
     let executable = executable.strip_prefix(source).unwrap();
     verify(source, true)?;
+    // Another app has another identity: its privacy grants and its build's features would
+    // not carry over. The app in use may be behind an entry-point link.
+    let in_use = dest.canonicalize().ok();
+    if let Some(app) = in_use.as_deref().and_then(bundle).and_then(Path::file_name)
+        && app != name
+    {
+        return Err(io::Error::other(format!(
+            "refusing to replace {} with {}: an update keeps the same app",
+            app.display(),
+            name.display()
+        )));
+    }
     let enclosing_app = dest.ancestors().find(|p| p.extension().is_some_and(|e| e == "app"));
     if let Some(app) = enclosing_app {
         if bundle(dest) != Some(app) {
             return Err(io::Error::other("refusing to replace a host application"));
-        }
-        // Another app has another identity: its privacy grants and its build's features would not carry over.
-        if app.file_name() != Some(name) {
-            return Err(io::Error::other(format!(
-                "refusing to replace {} with {}: an update keeps the same app",
-                app.file_name().unwrap().display(),
-                name.display()
-            )));
         }
         verify(app, true)?;
     }
@@ -299,6 +303,11 @@ pub fn install(source: &Path, dest: &Path, works: impl Fn(&Path) -> bool) -> io:
     let mut activated = false;
     let result = (|| {
         checked("/usr/bin/ditto", &[source.as_os_str(), staged.as_os_str()])?;
+        // A package manager seals its app by making the executable's folder read-only.
+        // This copy is hc's own to update: the seal stays with the source.
+        let folder = staged.join(executable.parent().unwrap());
+        let mode = std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&folder)?.permissions());
+        std::fs::set_permissions(&folder, std::os::unix::fs::PermissionsExt::from_mode(mode | 0o200))?;
         verify(&staged, true)?;
         if !works(&staged.join(executable)) {
             return Err(io::ErrorKind::InvalidData.into());

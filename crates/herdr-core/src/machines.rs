@@ -518,7 +518,8 @@ pub fn install(paths: &crate::paths::Paths, to: Reach, session: Option<&str>) ->
     let session = session.map(|s| format!("HC_SESSION={s} ")).unwrap_or_default();
     if let Some(inside) = bundled {
         let script = format!(
-            "set -e; d=$HOME/.local/bin; mkdir -p \"$d\"; t=$(mktemp -d); trap \"rm -rf \\\"$t\\\"\" EXIT; \
+            "set -e; d=$HOME/.local/bin; mkdir -p \"$d\"; t=$(mktemp -d); \
+             trap \"chmod -R u+w \\\"$t\\\"; rm -rf \\\"$t\\\"\" EXIT; \
              head -c {n} > \"$t/core.tar\"; [ $(wc -c < \"$t/core.tar\") -eq {n} ]; \
              tar -xf \"$t/core.tar\" -C \"$t\"; b=\"$t/{inside}\"; \
              \"$b\" --hc-install-bundle \"$b\" \"$d/herdr-core\"; \

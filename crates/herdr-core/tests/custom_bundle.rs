@@ -36,8 +36,12 @@ fn bundle(dir: &Path, app: &str, exe: &str, identifier: &str) -> PathBuf {
 
 /// A session whose hc is the custom app, installed the way an installer does it.
 fn installed() -> Session {
+    installed_as("hc.app", "hc", "test.custom.hc")
+}
+
+fn installed_as(app: &str, exe: &str, identifier: &str) -> Session {
     let mut s = Session::new();
-    let source = bundle(&s.root.join("source"), "hc.app", "hc", "test.custom.hc");
+    let source = bundle(&s.root.join("source"), app, exe, identifier);
     let entry = s.root.join(".local/bin/herdr-core");
     std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
     let out = s
@@ -115,4 +119,58 @@ fn a_custom_named_bundle_reaches_a_machine_whole() {
     local.json(&["machine", "update", "bare"]);
     assert_eq!(remote.bin.canonicalize().unwrap(), active);
     local.json(&["machine", "rm", "bare"]);
+}
+
+#[test]
+fn another_app_never_replaces_a_custom_named_bundle_on_a_machine() {
+    let remote = installed();
+    let before = remote.bin.canonicalize().unwrap();
+    // The entry point there is a link, not the app itself: the app behind it still decides.
+    assert!(remote.bin.is_symlink());
+    let mut local = installed_as("Herdr Core.app", "herdr-core", "dev.herdr.core");
+    local.env.push(fake_ssh(&local, &[("there", &remote)]));
+    local.json(&["machine", "add", "there"]);
+    let (_, err) = local.err(&["--json", "machine", "update", "there"]);
+    assert_eq!(err["error"]["kind"], "install_failed", "{err}");
+    assert!(err["error"]["message"].as_str().unwrap_or_default().contains("hc.app"), "{err}");
+    assert_eq!(remote.bin.canonicalize().unwrap(), before);
+    assert_eq!(remote.bin.with_file_name("hc").canonicalize().unwrap(), before);
+    assert!(!remote.root.join(".local/share/herdr-core/active/Herdr Core.app").exists());
+    local.json(&["machine", "rm", "there"]);
+}
+
+#[test]
+fn a_package_managers_seal_on_the_source_app_stays_behind_where_hc_installs_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut remote = Session::new();
+    remote.bin = remote.root.join(".local/bin/herdr-core");
+    let mut local = Session::new();
+    let source = bundle(&local.root.join("source"), "hc.app", "hc", "test.custom.hc");
+    // A package manager marks its app as not hc's to replace: the executable's folder is read-only.
+    let sealed = source.parent().unwrap();
+    let seal = |mode| std::fs::set_permissions(sealed, std::fs::Permissions::from_mode(mode)).unwrap();
+    seal(0o555);
+    let entry = local.root.join(".local/bin/herdr-core");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    let install = local
+        .program(&source)
+        .arg("--hc-install-bundle")
+        .arg(&source)
+        .arg(&entry)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    local.bin = entry;
+    local.env.push(fake_ssh(&local, &[("bare", &remote)]));
+    let app = sealed.parent().unwrap().parent().unwrap().to_str().unwrap();
+    // What hc installed is hc's to update, here and on a machine.
+    let update = local.hc(&["--json", "update", "--from", app]);
+    let add = local.hc(&["--json", "machine", "add", "bare", "--install"]);
+    let again = local.hc(&["--json", "machine", "update", "bare"]);
+    let still_sealed = std::fs::metadata(sealed).unwrap().permissions().mode() & 0o222 == 0;
+    seal(0o755); // before any assert: a sealed folder would survive the session's cleanup
+    for (what, out) in [("install", install), ("update", update), ("machine add", add), ("machine update", again)] {
+        assert!(out.status.success(), "{what}: {out:?}");
+    }
+    assert!(still_sealed, "the source app keeps its seal");
 }
